@@ -1,0 +1,7 @@
+
+*.n
+*.cmi
+*.cmx
+*.obj
+/nekoc.exe
+/nekoc.ml

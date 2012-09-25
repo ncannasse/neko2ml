@@ -1,0 +1,56 @@
+open Neko.Bytecode;
+
+neko("
+	@sys_cmd = $loader.loadprim('std@sys_command',1);
+")
+
+var out = &(fst IO.write_string())
+
+function w(str) {
+	IO.write (*out) str
+}
+
+function acc(v) {
+	w("acc := "+v);
+}
+
+function command( s : string ) : void {
+	neko("@sys_cmd(s)");
+}
+
+function build(file) {
+	var ch = IO.read_file file true;
+	var globals, opcodes = Neko.Bytecode.read ch;
+	IO.close_in ch;
+	out := IO.write_file ((Sys.without_extension file) + ".ml") true;
+	w("open Neko2ml\n\n");
+	w("let run ctx =\n");
+	Array.iteri (function(pos,op) {
+		var line = &true;
+		match op {
+		| AccNull ->
+			acc("VNull");
+		| AccTrue ->
+			acc("vtrue")
+		| AccFalse ->
+			acc("vfalse")
+		| AccThis ->
+			acc("vm.vthis")
+		| AccInt i ->
+			acc("VInt "+i)
+		| AccStack s ->
+			acc("st"+s);
+		| _ ->
+			w("(* TODO " + string op + " *)\n");
+			line := false
+		}
+		if *line then w(";\n")
+	}) opcodes;
+	w(";;\n\n");
+	w("run()");
+	IO.close_out (*out);
+}
+
+var file = Array.get Sys.args() 0;
+build file;
+command "ocamlopt -o nekoc.exe Neko2ml.ml nekoc.ml"

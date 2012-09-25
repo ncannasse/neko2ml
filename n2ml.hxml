@@ -1,0 +1,4 @@
+-cp ../../../Prog/lang/neko/src
+-swf 
+-swf-header 800:600:30:FFFFFF
+-swf-version 9
