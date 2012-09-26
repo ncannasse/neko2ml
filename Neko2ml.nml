@@ -4,6 +4,11 @@ neko("
 	@sys_cmd = $loader.loadprim('std@sys_command',1);
 ")
 
+type resume_point {
+	mutable rstack : int option;
+	rtrap : bool;
+}
+
 var out = &(fst IO.write_string())
 
 function w(str) {
@@ -18,39 +23,344 @@ function command( s : string ) : void {
 	neko("@sys_cmd(s)");
 }
 
+function gname(v) {
+	var v = String.concat "_at_" (String.split v "@");
+	var v = String.concat "_sl_" (String.split v "/");
+	var v = String.concat "_dd_" (String.split v ":");
+	"g_"+v
+}
+
+function make_segs(opcodes,pos,end) {
+	var jtarget = Array.make (end - pos + 1) None;
+	var p = &pos;
+	while *p < end {
+		match Array.get opcodes (*p) {
+		| JumpIf delta | JumpIfNot delta | Jump delta ->
+			var t = (*p + delta - pos);
+			var e = { rstack = None; rtrap = false; };
+			if t < Array.length jtarget then Array.set jtarget t (Some e)
+		| Trap delta ->
+			var t = (*p + delta - pos);
+			var e = { rstack = None; rtrap = true; };
+			Array.set jtarget t (Some e)
+		| _ -> ()
+		}
+		p := *p + 1
+	}
+	jtarget;
+}
+
 function build(file) {
 	var ch = IO.read_file file true;
 	var globals, opcodes = Neko.Bytecode.read ch;
 	IO.close_in ch;
 	out := IO.write_file ((Sys.without_extension file) + ".ml") true;
 	w("open Neko2ml\n\n");
-	w("let run ctx =\n");
-	Array.iteri (function(pos,op) {
-		var line = &true;
-		match op {
-		| AccNull ->
-			acc("VNull");
-		| AccTrue ->
-			acc("vtrue")
-		| AccFalse ->
-			acc("vfalse")
-		| AccThis ->
-			acc("vm.vthis")
-		| AccInt i ->
-			acc("VInt "+i)
-		| AccStack s ->
-			acc("st"+s);
+	
+	Array.iter (function(g) {
+		match g {
+		| GlobalVar v ->
+			w("let "+(gname v)+" = ref VNull\n");
 		| _ ->
-			w("(* TODO " + string op + " *)\n");
-			line := false
+			()
 		}
-		if *line then w(";\n")
-	}) opcodes;
+	}) globals;
+	w("\n");
+	
+	w("let rec __empty() = ()\n\n");
+	
+	function op(p) {
+		Array.get opcodes (*p);
+	}
+	
+	function gen_fun(pos:int,end:int,nargs:int) {
+		var p = &pos;
+		var stack = &0;
+		w("and f_"+pos+" env");
+		while *stack < nargs {
+			w(" p"+(*stack));
+			stack := *stack + 1;
+		}
+		w(" =\n");
+		w("\tlet acc = ref VNull in\n");
+		stack := 0;
+		while *stack < nargs {
+			w("\tlet st"+(*stack)+" = ref p"+(*stack)+" in\n");
+			stack := *stack + 1;
+		}
+		
+		var maxstack = &0;
+		var old_out = *out;
+		var sout, scontent = IO.write_string();
+		out := sout;
+		
+		function st(s) {
+			"!st"+(*stack - s - 1)
+		}
+		
+		var segs = make_segs opcodes pos end;
+		w("  let rec fenter() =\n");
+		
+		var chk_stack = &nargs;
+		
+		function update_seg(delta) {
+			var spos = *p + delta - pos;
+			match Array.get segs spos {
+			| None ->
+				assert()
+			| Some r ->
+				match r.rstack {
+				| None ->
+					r.rstack := Some (*stack);
+				| Some v ->
+					if v != *stack then w("(* JUMP STACK DIFFER "+v+"/"+(*stack)+" *)");
+				}
+			}
+		}
+		
+		var final_jump = &false;
+		var has_ret = &false;
+		while( *p < end ) {
+			match Array.get segs (*p - pos) {
+			| None -> ()
+			| Some r ->
+				match r.rstack {
+				| None -> ()
+				| Some s ->
+					stack := s;
+					chk_stack := s;
+				}
+				if r.rtrap then {
+					w("  with Runtime v -> acc := v;\n");
+				} else {
+					if ! *final_jump then w("\tl_"+(*p)+"();\n");
+					w("  and l_"+(*p)+"() =\n");
+				}
+			}
+			var prev_final = *final_jump;
+			final_jump := false;
+			var line = &true;
+			var op = op p;
+			w("\t");
+			match op {
+			| AccNull ->
+				acc("VNull");
+			| AccTrue ->
+				acc("vtrue")
+			| AccFalse ->
+				acc("vfalse")
+			| AccThis ->
+				acc("vm.vthis")
+			| AccInt i when i < 0 ->
+				acc("VInt ("+i+")")
+			| AccInt i ->
+				acc("VInt "+i)
+			| Push ->
+				w("st"+(*stack)+" := !acc");
+				stack := *stack + 1;
+				if *stack > *maxstack then maxstack := *stack
+			| Pop n ->
+				stack := *stack - n;
+				w("(* pop "+n+" *)\n");
+				line := false;
+			| Ret n ->
+				if *p + 1 < end then {
+					w("return !acc");
+					final_jump := true;
+					has_ret := true;
+				} else {
+					w("(* ret *)\n");
+					line := false;
+				}
+			| AccStack0 ->
+				acc(st 0)
+			| AccStack1 ->
+				acc(st 1)
+			| AccStack s ->
+				acc(st s);
+			| AccGlobal i ->
+				match Array.get globals i {
+				| GlobalVar v -> acc("!"+gname v);
+				| GlobalFunction (pos,n) ->
+					acc("VFunction (Fun"+n+" (f_"+pos+" empty_env))");
+				| GlobalString s ->
+					acc("VString \""+String.escape s+"\"");
+				| _ ->
+					throw Error(string i);
+				}
+			| AccEnv i ->
+				w("acc := get_env env "+i);
+			| SetEnv i ->
+				w("set_env env "+i+" !acc");
+			| AccIndex0 ->
+				w("acc := get_index !acc 0");
+			| AccIndex1 ->
+				w("acc := get_index !acc 1");
+			| AccIndex i ->
+				w("acc := get_index !acc "+i);
+			| Call nargs ->
+				w("acc := do_call"+nargs+" !acc");
+				var i = &0;
+				while *i < nargs {
+					w(" "+st 0);
+					stack := *stack - 1;
+					i := *i + 1;
+				}
+			| TailCall (nargs,pop) ->
+				w("acc := do_call"+nargs+" !acc");
+				var i = &0;
+				while *i < nargs {
+					w(" "+st 0);
+					stack := *stack - 1;
+					i := *i + 1;
+				}
+				if *p + 1 < end then {
+					w("; return !acc");
+					has_ret := true;
+					final_jump := true
+				} else {
+					w("(* tail *)");
+				}
+			| Add ->
+				w("acc := do_add "+st 0+" !acc");
+				stack := *stack - 1;
+			| Sub ->
+				w("acc := do_sub "+st 0+" !acc");
+				stack := *stack - 1;
+			| Mult ->
+				w("acc := do_mult "+st 0+" !acc");
+				stack := *stack - 1;
+			| Div ->
+				w("acc := do_div "+st 0+" !acc");
+				stack := *stack - 1;
+			| Eq ->
+				w("acc := VBool (do_compare "+st 0+" !acc = 0)");
+				stack := *stack - 1;
+			| Neq ->
+				w("acc := VBool (do_compare "+st 0+" !acc <> 0)");
+				stack := *stack - 1;
+			| Gt ->
+				w("acc := VBool (do_compare "+st 0+" !acc > 0)");
+				stack := *stack - 1;
+			| Lt ->
+				w("acc := VBool (do_compare "+st 0+" !acc < 0)");
+				stack := *stack - 1;
+			| Gte ->
+				w("acc := VBool (do_compare "+st 0+" !acc >= 0)");
+				stack := *stack - 1;
+			| Lte ->
+				w("acc := VBool (do_compare "+st 0+" !acc <= 0)");
+				stack := *stack - 1;
+			| JumpIf delta ->
+				w("if is_true !acc then l_"+(*p + delta)+"() else let _ = () in\n");
+				update_seg delta;
+				line := false;
+			| JumpIfNot delta ->
+				w("if not (is_true !acc) then l_"+(*p + delta)+"() else let _ = () in\n");
+				update_seg delta;
+				line := false;
+			| Jump delta ->
+				if prev_final then {
+					w("(* jump *)\n");
+					line := false;
+				} else {
+					if *p + delta > end then {
+						w("f_"+(*p + delta)+"()");
+					} else {
+						w("l_"+(*p + delta)+"()");
+						update_seg delta
+					}
+					final_jump := true;
+				}
+			| Trap delta ->
+				w("try\n  let rec ttry() =\n");
+				stack := *stack + 6;
+				line := false;
+				update_seg delta
+			| EndTrap ->
+				w("() in ttry()");
+				stack := *stack - 6;
+			| MakeArray n ->
+				w("acc := VArray [|!acc");
+				var i = &0;
+				while *i < n {
+					w(";"+st 0);
+					i := *i + 1;
+					stack := *stack - 1;
+				}
+				w("|]");
+			| _ ->
+				w("todo \""+String.escape (string op)+"\"");
+			}
+			if *line then w(";\n");
+			chk_stack := *chk_stack + Neko.Compile.stack_delta op;
+			if *chk_stack != *stack then w("\t(* stack "+(*stack)+" should be "+(*chk_stack)+" *)\n");
+			p := *p + 1
+		}
+		if ! *final_jump then w("\t!acc\n");
+		
+		if *has_ret then
+			w("  in try fenter() with Return v -> v")
+		else
+			w("  in fenter()");
+			
+		w("\n\n");
+
+		// write function
+		
+		out := old_out;
+		var i = &nargs;
+		while *i < *maxstack {
+			w("\tlet st"+(*i)+" = ref VNull in\n");
+			i := *i + 1;
+		}
+		w(scontent());
+	}
+
+	var nops = Array.length opcodes;
+	var funs = Array.create();
+	function rec get_init_funs(start,cur) {
+		if cur == nops then
+			Array.add funs (start,0)
+		else match Array.get opcodes cur {
+		| Jump delta ->
+			Array.add funs (start,0);
+			get_init_funs (cur+delta) (cur+delta)
+		| JumpIf delta | JumpIfNot delta | Trap delta ->
+			get_init_funs start (cur + delta);
+		| _ ->
+			get_init_funs start (cur + 1);
+		}
+	}
+	get_init_funs 0 0;
+	
+	Array.iter (function(g) {
+		match g {
+		| GlobalFunction (p,nargs) ->
+			Array.add funs (p,nargs)
+		| _ ->
+			()
+		}
+	}) globals;
+	
+	Array.sort (function((p1,_),(p2,_)) p1 - p2) funs;
+	
+	Array.iteri (function(i,(p,nargs)) {
+		var next = if i == Array.length funs - 1 then nops else fst (Array.get funs (i+1));
+		gen_fun p next nargs
+	}) funs;
+	
 	w(";;\n\n");
-	w("run()");
+	w("f_0()");
 	IO.close_out (*out);
 }
 
 var file = Array.get Sys.args() 0;
-build file;
-command "ocamlopt -o nekoc.exe Neko2ml.ml nekoc.ml"
+try {
+	build file;
+} catch {
+	e ->
+		var e = string e;
+		neko "$rethrow(e)";
+}
+command "ocamlopt -w a -o nekoc.exe Neko2ml.ml nekoc.ml"

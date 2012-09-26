@@ -52,10 +52,15 @@
     <hidden path="List.n" />
     <hidden path="String.n" />
     <hidden path="Sys.n" />
+    <hidden path="Neko2ml.cmi" />
+    <hidden path="Neko2ml.cmx" />
+    <hidden path="Neko2ml.obj" />
+    <hidden path="nekoc.cmi" />
+    <hidden path="nekoc.n" />
+    <hidden path="nekoc.dump" />
   </hiddenPaths>
   <!-- Executed before build -->
-  <preBuildCommand>nekoml Neko2ml
-</preBuildCommand>
+  <preBuildCommand>nekoml Neko2ml</preBuildCommand>
   <!-- Executed after build -->
   <postBuildCommand alwaysRun="False" />
   <!-- Other project options -->
