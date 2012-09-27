@@ -1,3 +1,3 @@
 @echo off
-neko Neko2ml nekoc.n
+neko Neko2ml fib_full.n
 pause

@@ -58,6 +58,14 @@
     <hidden path="nekoc.cmi" />
     <hidden path="nekoc.n" />
     <hidden path="nekoc.dump" />
+    <hidden path="nekoc.ml" />
+    <hidden path="String.dump" />
+    <hidden path="LexEngine.n" />
+    <hidden path="Lexer.n" />
+    <hidden path="Map.n" />
+    <hidden path="nekoc.cmx" />
+    <hidden path="nekoc.exe" />
+    <hidden path="nekoc.obj" />
   </hiddenPaths>
   <!-- Executed before build -->
   <preBuildCommand>nekoml Neko2ml</preBuildCommand>

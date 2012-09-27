@@ -23,6 +23,11 @@ function command( s : string ) : void {
 	neko("@sys_cmd(s)");
 }
 
+function hfield(v:string) {
+	var fid : int = neko "$hash(v)";
+	(if fid < 0 then "("+fid+")" else string fid)+"(*"+v+"*)";
+}
+
 function gname(v) {
 	var v = String.concat "_at_" (String.split v "@");
 	var v = String.concat "_sl_" (String.split v "/");
@@ -76,11 +81,15 @@ function build(file) {
 	function gen_fun(pos:int,end:int,nargs:int) {
 		var p = &pos;
 		var stack = &0;
-		w("and f_"+pos+" env");
+		w("and f_"+pos);
+		if nargs > 5 then w(" [");
 		while *stack < nargs {
+			if nargs > 5 && *stack > 0 then w(";");
 			w(" p"+(*stack));
 			stack := *stack + 1;
 		}
+		if nargs > 5 then w("]");
+		if nargs == 0 then w(" ()");
 		w(" =\n");
 		w("\tlet acc = ref VNull in\n");
 		stack := 0;
@@ -118,7 +127,20 @@ function build(file) {
 			}
 		}
 		
-		var final_jump = &false;
+		var final_dead = &false;
+		var dead_end = &false;
+		
+		function rec dead_code() {
+			if *p + 1 == end then {
+				final_dead := true;
+			} else if Array.get segs (*p + 1 - pos) != None then {
+				dead_end := true;
+			} else {
+				p := *p + 1;
+				dead_code();
+			}
+		}
+		
 		var has_ret = &false;
 		while( *p < end ) {
 			match Array.get segs (*p - pos) {
@@ -133,12 +155,11 @@ function build(file) {
 				if r.rtrap then {
 					w("  with Runtime v -> acc := v;\n");
 				} else {
-					if ! *final_jump then w("\tl_"+(*p)+"();\n");
+					if ! *dead_end then w("\tl_"+(*p)+"();\n");
 					w("  and l_"+(*p)+"() =\n");
 				}
 			}
-			var prev_final = *final_jump;
-			final_jump := false;
+			dead_end := false;
 			var line = &true;
 			var op = op p;
 			w("\t");
@@ -150,7 +171,7 @@ function build(file) {
 			| AccFalse ->
 				acc("vfalse")
 			| AccThis ->
-				acc("vm.vthis")
+				acc("!vthis")
 			| AccInt i when i < 0 ->
 				acc("VInt ("+i+")")
 			| AccInt i ->
@@ -164,13 +185,12 @@ function build(file) {
 				w("(* pop "+n+" *)\n");
 				line := false;
 			| Ret n ->
-				if *p + 1 < end then {
-					w("return !acc");
-					final_jump := true;
-					has_ret := true;
+				dead_code();
+				if *final_dead || *dead_end then {
+					w("!acc");
 				} else {
-					w("(* ret *)\n");
-					line := false;
+					w("return !acc");
+					has_ret := true;
 				}
 			| AccStack0 ->
 				acc(st 0)
@@ -178,48 +198,82 @@ function build(file) {
 				acc(st 1)
 			| AccStack s ->
 				acc(st s);
+			| SetStack s ->
+				w("st"+(*stack - s - 1)+" := !acc");
 			| AccGlobal i ->
 				match Array.get globals i {
 				| GlobalVar v -> acc("!"+gname v);
 				| GlobalFunction (pos,n) ->
-					acc("VFunction (Fun"+n+" (f_"+pos+" empty_env))");
+					acc("VFunction (Fun"+(if n > 5 then "Var" else string n)+" f_"+pos+")");
 				| GlobalString s ->
 					acc("VString \""+String.escape s+"\"");
 				| _ ->
-					throw Error(string i);
+					assert()
+				}
+			| SetGlobal i ->
+				match Array.get globals i {
+				| GlobalVar v ->
+					w(gname v + " := !acc");
+				| _ ->
+					assert()
 				}
 			| AccEnv i ->
-				w("acc := get_env env "+i);
+				w("acc := get_env "+i);
 			| SetEnv i ->
-				w("set_env env "+i+" !acc");
+				w("set_env "+i+" !acc");
 			| AccIndex0 ->
 				w("acc := get_index !acc 0");
 			| AccIndex1 ->
 				w("acc := get_index !acc 1");
 			| AccIndex i ->
 				w("acc := get_index !acc "+i);
+			| SetIndex i ->
+				w("set_index "+(st 0)+" "+i+" !acc");
+				stack := *stack - 1
+			| AccBuiltin i ->
+				match i {
+				| "loader" ->
+					w("acc := module_loader");
+				| _ ->
+					w("acc := VFunction Builtin.b_"+i);
+				}
+			| TypeOf ->
+				w("acc := Builtin.f_typeof !acc");
 			| Call nargs ->
 				w("acc := do_call"+nargs+" !acc");
 				var i = &0;
 				while *i < nargs {
-					w(" "+st 0);
-					stack := *stack - 1;
+					w(" "+st (nargs - (*i) - 1));
 					i := *i + 1;
 				}
+				stack := *stack - nargs;
+			| ObjCall nargs ->
+				w("let old_this = !vthis in\n");
+				w("\tvthis := "+(st 0)+";\n");
+				stack := *stack - 1;
+				w("\tacc := do_call"+nargs+" !acc");
+				var i = &0;
+				while *i < nargs {
+					w(" "+st (nargs - (*i) - 1));
+					i := *i + 1;
+				}
+				stack := *stack - nargs;
+				w(";\n");
+				w("\tvthis := old_this");
 			| TailCall (nargs,pop) ->
 				w("acc := do_call"+nargs+" !acc");
 				var i = &0;
 				while *i < nargs {
-					w(" "+st 0);
-					stack := *stack - 1;
+					w(" "+st (nargs - (*i) - 1));
 					i := *i + 1;
 				}
-				if *p + 1 < end then {
+				stack := *stack - nargs;
+				dead_code();
+				if *final_dead || *dead_end then {
+					w("; !acc");
+				} else {
 					w("; return !acc");
 					has_ret := true;
-					final_jump := true
-				} else {
-					w("(* tail *)");
 				}
 			| Add ->
 				w("acc := do_add "+st 0+" !acc");
@@ -260,18 +314,29 @@ function build(file) {
 				update_seg delta;
 				line := false;
 			| Jump delta ->
-				if prev_final then {
-					w("(* jump *)\n");
-					line := false;
+				if *p + delta > end then {
+					w("f_"+(*p + delta)+" ()");
 				} else {
-					if *p + delta > end then {
-						w("f_"+(*p + delta)+"()");
-					} else {
-						w("l_"+(*p + delta)+"()");
-						update_seg delta
-					}
-					final_jump := true;
+					w("l_"+(*p + delta)+"()");
+					update_seg delta
 				}
+				dead_code();
+			| JumpTable max ->
+				w("match !acc with\n");
+				var i = &0;
+				while *i < max {
+					p := *p + 1;
+					match Array.get opcodes (*p) {
+					| Jump delta ->
+						w("\t| VInt "+(*i)+" -> l_"+(*p + delta)+"()\n");
+						update_seg delta
+					| _ ->
+						assert()
+					}
+					i := *i + 1;
+				}
+				w("\t| _ ->\n");
+				line := false;
 			| Trap delta ->
 				w("try\n  let rec ttry() =\n");
 				stack := *stack + 6;
@@ -289,15 +354,32 @@ function build(file) {
 					stack := *stack - 1;
 				}
 				w("|]");
+			| New ->
+				w("acc := Builtin.f_new !acc");
+			| AccField n ->
+				w("acc := get_field !acc "+(hfield n));
+			| SetField n ->
+				w("set_field "+(st 0)+" "+(hfield n)+" !acc");
+				stack := *stack - 1;
+			| MakeEnv n ->
+				w("acc := make_env !acc [|");
+				var i = &0;
+				while *i < n {
+					if *i > 0 then w(";");
+					w(st (n-(*i)-1));
+					i := *i + 1;
+				}
+				w("|]");
+				stack := *stack - n;
 			| _ ->
-				w("todo \""+String.escape (string op)+"\"");
+				w("todo \"opcode "+String.escape (string op)+"\"");
 			}
 			if *line then w(";\n");
 			chk_stack := *chk_stack + Neko.Compile.stack_delta op;
 			if *chk_stack != *stack then w("\t(* stack "+(*stack)+" should be "+(*chk_stack)+" *)\n");
 			p := *p + 1
 		}
-		if ! *final_jump then w("\t!acc\n");
+		if ! *final_dead then w("\t!acc\n");
 		
 		if *has_ret then
 			w("  in try fenter() with Return v -> v")
@@ -326,8 +408,13 @@ function build(file) {
 		| Jump delta ->
 			Array.add funs (start,0);
 			get_init_funs (cur+delta) (cur+delta)
-		| JumpIf delta | JumpIfNot delta | Trap delta ->
+		| JumpIf delta | JumpIfNot delta ->
 			get_init_funs start (cur + delta);
+		| Trap delta ->
+			match Array.get opcodes (cur + delta - 1) {
+			| Jump d2 -> get_init_funs start (cur+delta-1+d2)
+			| _ -> assert()
+			}
 		| _ ->
 			get_init_funs start (cur + 1);
 		}
@@ -351,7 +438,7 @@ function build(file) {
 	}) funs;
 	
 	w(";;\n\n");
-	w("f_0()");
+	w("try f_0() with Runtime e -> failwith (\"Uncaught exception : \" ^ to_string 0 e)");
 	IO.close_out (*out);
 }
 
@@ -363,4 +450,6 @@ try {
 		var e = string e;
 		neko "$rethrow(e)";
 }
-command "ocamlopt -w a -o nekoc.exe Neko2ml.ml nekoc.ml"
+command "ocamlopt -w a -o fib_full.exe Neko2ml.ml fib_full.ml";
+command "fib_full";
+
